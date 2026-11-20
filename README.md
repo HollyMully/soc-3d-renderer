@@ -2,7 +2,7 @@
 
 A 3D visualizer of a simulated network attack chain, written in **raw WebGL** (no Three.js or other libraries). It shows a small enterprise network from a SOC analyst's point of view: healthy nodes, compromised nodes pulsing red, and attack packets moving laterally along the links, with IDS alerts mapped to MITRE ATT&CK.
 
-**Live demo:** https://HollyMully.github.io/soc-3d-renderer/
+Live demo: [https://HollyMully.github.io/soc-3d-renderer/](https://hollymully.github.io/soc-3d-renderer/)
 
 
 ## Features
