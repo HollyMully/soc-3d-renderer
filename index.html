@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SOC 3D Network Renderer</title>
+<style>
+:root{--bg:#070b13;--fg:#d6deeb;--mut:#7f8da6;--panel:rgba(12,18,30,.88);--bd:#24304a;--red:#ff4d4d;--amb:#ffb020;--ok:#4cc38a;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 "IBM Plex Sans","Segoe UI",system-ui,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+.lbl{position:fixed;left:0;top:0;transform:translate(-50%,-100%);font-size:11px;color:var(--mut);white-space:nowrap;pointer-events:none;text-shadow:0 0 4px #000}
+.lbl.bad{color:var(--red);font-weight:600}.lbl.warn{color:var(--amb)}
+#hud{position:fixed;left:12px;top:calc(12px + env(safe-area-inset-top,0px));width:min(340px,calc(100vw - 24px));background:var(--panel);border:1px solid var(--bd);border-radius:6px;padding:12px}
+h1{font-size:15px;margin:0 0 2px;font-weight:600}
+.sub{color:var(--mut);margin:0 0 10px;font-size:12px}
+.row{display:flex;gap:8px;margin-bottom:10px}
+button{flex:1;background:#14203a;color:var(--fg);border:1px solid var(--bd);border-radius:4px;padding:8px;font:inherit;cursor:pointer}
+button:hover{background:#1b2c52}button:focus-visible{outline:2px solid var(--amb);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+#stat{margin-bottom:8px;color:var(--mut)}#stat b{color:var(--fg)}
+#log{max-height:150px;overflow:auto;border-top:1px solid var(--bd);padding-top:8px;font-size:12px}
+#log div{margin-bottom:3px;color:var(--mut)}#log .a{color:var(--red)}#log .i{color:var(--fg)}
+#help{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));color:var(--mut);font-size:12px;text-align:right;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+<h1>SOC network renderer</h1>
+<p class="sub">Raw WebGL · Phong shading · TRS matrices · free camera</p>
+<div class="row"><button id="go">Start attack</button><button id="rs">Reset</button></div>
+<div id="stat">Compromised: <b id="cnt">0</b> / 4 · IDS: <b id="ids">quiet</b></div>
+<div id="log"><div>Network healthy. Press Start attack to simulate lateral movement.</div></div>
+</div>
+<div id="help">Drag: look · W A S D: move · Q E: down/up · Shift: fast · Wheel: dolly</div>
+<script>
+const cv=document.getElementById('c'),gl=cv.getContext('webgl');
+const VS=`attribute vec3 a_pos;attribute vec3 a_nor;uniform mat4 u_model,u_vp;uniform vec3 u_s;varying vec3 v_n,v_p;
+void main(){vec4 w=u_model*vec4(a_pos,1.);v_p=w.xyz;v_n=mat3(u_model)*(a_nor/u_s);gl_Position=u_vp*w;}`;
+const FS=`precision mediump float;varying vec3 v_n,v_p;uniform vec3 u_col,u_eye,u_light;uniform float u_t,u_state,u_unlit,u_emis;
+void main(){if(u_unlit>.5){gl_FragColor=vec4(u_col,1.);return;}
+vec3 n=normalize(v_n),l=normalize(u_light-v_p),v=normalize(u_eye-v_p),h=normalize(l+v);
+vec3 c=u_col;float pulse=.5+.5*sin(u_t*6.);
+if(u_state>1.5)c=mix(c,vec3(1.,.69,.12),.5+.5*sin(u_t*3.));
+else if(u_state>.5)c=mix(c,vec3(1.,.08,.08),pulse);
+float d=max(dot(n,l),0.),s=pow(max(dot(n,h),0.),48.),rim=pow(1.-max(dot(n,v),0.),3.);
+vec3 col=c*(.22+.85*d)+vec3(.55)*s*.6+u_emis*c;
+if(u_state>.5&&u_state<1.5)col+=vec3(1.,.1,.1)*(.3*pulse+rim*.8);
+gl_FragColor=vec4(col,1.);}`;
+function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o}
+const pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(pr);gl.useProgram(pr);
+const U={};['u_model','u_vp','u_s','u_col','u_eye','u_light','u_t','u_state','u_unlit','u_emis'].forEach(k=>U[k]=gl.getUniformLocation(pr,k));
+const A_POS=gl.getAttribLocation(pr,'a_pos'),A_NOR=gl.getAttribLocation(pr,'a_nor');
+gl.enableVertexAttribArray(A_POS);gl.enableVertexAttribArray(A_NOR);gl.enable(gl.DEPTH_TEST);
+
+/* ---- math (column-major) ---- */
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+nrm=a=>{const l=Math.hypot(...a)||1;return[a[0]/l,a[1]/l,a[2]/l]};
+function mul(a,b){const o=new Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s}return o}
+const persp=(f,a,n,z)=>{const t=1/Math.tan(f/2);return[t/a,0,0,0,0,t,0,0,0,0,(z+n)/(n-z),-1,0,0,2*z*n/(n-z),0]};
+function look(e,c,u){const z=nrm(sub(e,c)),x=nrm(cross(u,z)),y=cross(z,x);return[x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dot(x,e),-dot(y,e),-dot(z,e),1]}
+function trs(t,ry,s){const c=Math.cos(ry),n=Math.sin(ry);return[c*s[0],0,-n*s[0],0,0,s[1],0,0,n*s[2],0,c*s[2],0,t[0],t[1],t[2],1]}
+const I4=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+
+/* ---- meshes (interleaved pos+normal) ---- */
+function mesh(v,idx){const vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(v),gl.STATIC_DRAW);
+const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(idx),gl.STATIC_DRAW);return{vb,ib,n:idx.length}}
+function sphere(N=20){const v=[],ix=[];for(let i=0;i<=N;i++)for(let j=0;j<=N;j++){const t=i*Math.PI/N,p=j*2*Math.PI/N,x=Math.sin(t)*Math.cos(p),y=Math.cos(t),z=Math.sin(t)*Math.sin(p);v.push(x,y,z,x,y,z)}
+for(let i=0;i<N;i++)for(let j=0;j<N;j++){const a=i*(N+1)+j,b=a+N+1;ix.push(a,b,a+1,b,b+1,a+1)}return mesh(v,ix)}
+function cube(){const v=[],ix=[];for(let ax=0;ax<3;ax++)for(const s of[-1,1]){const u=(ax+1)%3,w=(ax+2)%3,b=v.length/6;
+for(const[p,q]of[[-1,-1],[1,-1],[1,1],[-1,1]]){const P=[0,0,0],Nn=[0,0,0];P[ax]=s;P[u]=p;P[w]=q;Nn[ax]=s;v.push(...P,...Nn)}ix.push(b,b+1,b+2,b,b+2,b+3)}return mesh(v,ix)}
+function cyl(N=24){const v=[],ix=[];for(let j=0;j<=N;j++){const p=j*2*Math.PI/N,c=Math.cos(p),s=Math.sin(p);v.push(c,-1,s,c,0,s,c,1,s,c,0,s)}
+for(let j=0;j<N;j++){const a=j*2;ix.push(a,a+1,a+2,a+1,a+3,a+2)}
+for(const y of[-1,1]){const b=v.length/6;v.push(0,y,0,0,y,0);for(let j=0;j<=N;j++){const p=j*2*Math.PI/N;v.push(Math.cos(p),y,Math.sin(p),0,y,0)}for(let j=0;j<N;j++)ix.push(b,b+1+j,b+2+j)}return mesh(v,ix)}
+const MS={sphere:sphere(),cube:cube(),cyl:cyl()};
+function bind(m){gl.bindBuffer(gl.ARRAY_BUFFER,m.vb);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,m.ib);gl.vertexAttribPointer(A_POS,3,gl.FLOAT,false,24,0);gl.vertexAttribPointer(A_NOR,3,gl.FLOAT,false,24,12)}
+
+/* ---- topology ---- */
+const ST={cloud:['sphere',[1.8,1,1.2],[.3,.45,.8]],fw:['cube',[.4,1.1,1.1],[.78,.42,.18]],router:['cyl',[1,.5,1],[.18,.55,.72]],
+switch:['cube',[1.4,.4,.9],[.28,.62,.5]],server:['cyl',[.8,1.2,.8],[.42,.47,.58]],pc:['cube',[.8,.5,.6],[.48,.52,.72]],siem:['sphere',[.9,.9,.9],[.55,.38,.78]]};
+const N=[['Internet','cloud',[-13,2,0]],['Firewall','fw',[-9,1,0]],['Core Router','router',[-5,1,0]],['DMZ Switch','switch',[-1,1,-5]],['LAN Switch','switch',[-1,1,5]],
+['Web Server','server',[5,1,-7]],['Mail Server','server',[5,1,-3]],['DB Server','server',[6,1,3]],['File Server','server',[6,1,7]],['WS-01','pc',[2,.5,10]],['WS-02','pc',[-4,.5,10]],['SIEM / IDS','siem',[-8,1,6]]]
+.map(([name,type,pos])=>({name,type,pos,state:0}));
+const E=[[0,1],[1,2],[2,3],[2,4],[3,5],[3,6],[4,7],[4,8],[4,9],[4,10],[4,11]];
+const eid=(a,b)=>E.findIndex(e=>(e[0]==a&&e[1]==b)||(e[0]==b&&e[1]==a));
+const PATH=[[0,1,0,'C2 beacon from external host reaches the perimeter firewall'],[1,2,0,'Traffic forwarded to the core router'],[2,3,0,'Traffic routed into the DMZ'],
+[3,5,1,'IDS ALERT: Web Server compromised, webshell upload (T1505.003)'],[5,3,0,'Pivot traffic leaves the Web Server'],[3,2,0,'Pivot traffic crosses the core'],
+[2,4,0,'Lateral movement enters the LAN segment'],[4,9,1,'IDS ALERT: WS-01 compromised, credential dumping (T1003)'],[9,4,0,'Stolen credentials reused from WS-01'],
+[4,8,1,'IDS ALERT: File Server compromised, SMB lateral movement (T1021.002)'],[8,4,0,'Attacker returns to the LAN switch'],[4,7,1,'IDS ALERT: DB Server compromised, data exfiltration (T1041)']];
+
+/* line buffer: edges then floor grid */
+const L=[];E.forEach(([a,b])=>{L.push(...N[a].pos,0,1,0,...N[b].pos,0,1,0)});const gs=L.length/6;
+for(let i=-20;i<=20;i+=2){L.push(i,-.6,-20,0,1,0,i,-.6,20,0,1,0,-20,-.6,i,0,1,0,20,-.6,i,0,1,0)}
+const lb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,lb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(L),gl.STATIC_DRAW);const gridN=(L.length/6)-gs;
+
+/* ---- camera ---- */
+const cam={p:[-2,10,25],yaw:0,pitch:-.38},keys={};
+const fwd=()=>[Math.sin(cam.yaw)*Math.cos(cam.pitch),Math.sin(cam.pitch),-Math.cos(cam.yaw)*Math.cos(cam.pitch)];
+let drag=false,lx=0,ly=0;
+cv.addEventListener('pointerdown',e=>{drag=true;lx=e.clientX;ly=e.clientY;cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointerup',()=>drag=false);
+cv.addEventListener('pointermove',e=>{if(!drag)return;cam.yaw+=(e.clientX-lx)*.005;cam.pitch=Math.max(-1.5,Math.min(1.5,cam.pitch-(e.clientY-ly)*.005));lx=e.clientX;ly=e.clientY});
+cv.addEventListener('wheel',e=>{e.preventDefault();const f=fwd();cam.p=cam.p.map((v,i)=>v-f[i]*e.deltaY*.02)},{passive:false});
+addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+function moveCam(dt){const f=fwd(),r=nrm(cross(f,[0,1,0])),sp=(keys.shift?16:7)*dt;let m=[0,0,0];
+if(keys.w)m=m.map((v,i)=>v+f[i]);if(keys.s)m=m.map((v,i)=>v-f[i]);if(keys.d)m=m.map((v,i)=>v+r[i]);if(keys.a)m=m.map((v,i)=>v-r[i]);if(keys.e)m[1]+=1;if(keys.q)m[1]-=1;
+cam.p=cam.p.map((v,i)=>v+m[i]*sp)}
+
+/* ---- simulation ---- */
+const D=1.1;let atk={on:false,i:0,t0:0},used=new Set();
+const logEl=document.getElementById('log');
+function log(t,c){const d=document.createElement('div');d.textContent=t;if(c)d.className=c;logEl.prepend(d)}
+function stats(){document.getElementById('cnt').textContent=N.filter(n=>n.state==1).length;document.getElementById('ids').textContent=N[11].state?'alerting':'quiet'}
+const go=document.getElementById('go');
+go.onclick=()=>{reset();atk={on:true,i:0,t0:performance.now()};go.disabled=true;log('Attack simulation started','i')};
+function reset(){N.forEach(n=>n.state=0);used.clear();atk.on=false;go.disabled=false;logEl.innerHTML='<div>Network healthy.</div>';stats()}
+document.getElementById('rs').onclick=reset;
+
+/* ---- labels ---- */
+const labs=N.map(n=>{const d=document.createElement('div');d.className='lbl';d.textContent=n.name;document.body.appendChild(d);return d});
+
+/* ---- render ---- */
+function setU(col,o={}){gl.uniform3fv(U.u_col,col);gl.uniform1f(U.u_state,o.state||0);gl.uniform1f(U.u_emis,o.emis||0);gl.uniform1f(U.u_unlit,o.unlit||0)}
+function drawM(name,t,ry,s,col,o){bind(MS[name]);gl.uniformMatrix4fv(U.u_model,false,trs(t,ry,s));gl.uniform3fv(U.u_s,s);setU(col,o);gl.drawElements(gl.TRIANGLES,MS[name].n,gl.UNSIGNED_SHORT,0)}
+const lerp=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
+let prev=performance.now();
+function frame(now){const dt=Math.min((now-prev)/1000,.1);prev=now;const T=now/1000;moveCam(dt);
+const dpr=Math.min(devicePixelRatio||1,2),w=cv.clientWidth,h=cv.clientHeight;if(cv.width!=w*dpr|0||cv.height!=h*dpr|0){cv.width=w*dpr;cv.height=h*dpr}
+gl.viewport(0,0,cv.width,cv.height);gl.clearColor(.027,.043,.075,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+const f=fwd(),eye=cam.p,vp=mul(persp(1,w/h,.1,200),look(eye,[eye[0]+f[0],eye[1]+f[1],eye[2]+f[2]],[0,1,0]));
+gl.uniformMatrix4fv(U.u_vp,false,vp);gl.uniform3fv(U.u_eye,eye);gl.uniform3fv(U.u_light,[Math.cos(T*.2)*10,18,Math.sin(T*.2)*10+4]);gl.uniform1f(U.u_t,T);
+/* attack stepping */
+let pk=null;if(atk.on){const s=PATH[atk.i],e=(now-atk.t0)/(D*1000);
+if(e>=1){used.add(eid(s[0],s[1]));if(s[2]){N[s[1]].state=1;if(!N[11].state)N[11].state=2;log(s[3],'a')}else log(s[3],'i');stats();atk.i++;atk.t0=now;
+if(atk.i>=PATH.length){atk.on=false;go.disabled=false;log('Simulation finished: 4 hosts compromised','a')}}else pk={a:s[0],b:s[1],e}}
+/* lines */
+gl.bindBuffer(gl.ARRAY_BUFFER,lb);gl.vertexAttribPointer(A_POS,3,gl.FLOAT,false,24,0);gl.vertexAttribPointer(A_NOR,3,gl.FLOAT,false,24,12);
+gl.uniformMatrix4fv(U.u_model,false,I4);gl.uniform3fv(U.u_s,[1,1,1]);
+setU([.1,.15,.24],{unlit:1});gl.drawArrays(gl.LINES,gs,gridN);
+E.forEach((e,i)=>{setU(used.has(i)?[1,.25,.25]:[.25,.38,.6],{unlit:1});gl.drawArrays(gl.LINES,i*2,2)});
+/* nodes */
+N.forEach((n,i)=>{const[m,s,c]=ST[n.type];drawM(m,n.pos,T*.3+i,s,c,{state:n.state})});
+/* benign traffic */
+E.forEach((e,i)=>{const t=(T*.25+i*.37)%1;drawM('sphere',lerp(N[e[0]].pos,N[e[1]].pos,t),0,[.12,.12,.12],[.3,.85,.55],{emis:1})});
+/* attack packet + trail */
+if(pk)for(let k=0;k<4;k++){const t=Math.max(0,pk.e-k*.07),r=.3-k*.05;drawM('sphere',lerp(N[pk.a].pos,N[pk.b].pos,t),0,[r,r,r],[1,.2,.1],{emis:1.6})}
+/* labels */
+N.forEach((n,i)=>{const p=[n.pos[0],n.pos[1]+1.6,n.pos[2],1],c=[0,1,2,3].map(r=>vp[r]*p[0]+vp[4+r]*p[1]+vp[8+r]*p[2]+vp[12+r]);
+const d=labs[i];if(c[3]<=0){d.style.display='none';return}d.style.display='block';
+d.style.left=((c[0]/c[3]*.5+.5)*w)+'px';d.style.top=((1-(c[1]/c[3]*.5+.5))*h)+'px';d.className='lbl'+(n.state==1?' bad':n.state==2?' warn':'')});
+requestAnimationFrame(frame)}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
